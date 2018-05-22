@@ -27,11 +27,11 @@ fi
 
 CARGO_LOC=`which cargo || true`
 export CARGO=${CARGO_PATH-"${CARGO_LOC}"}
-#if [ -z ${CARGO} ] || [ ! -e ${CARGO} ]; then
-    #echo "Could not find a preinstalled Cargo in PATH. Set CARGO_PATH if necessary."
-    #exit 1
-#fi
-#echo "Using Cargo from ${CARGO}"
+if [ -z ${CARGO} ] || [ ! -e ${CARGO} ]; then
+    echo "Could not find a preinstalled Cargo in PATH. Set CARGO_PATH if necessary."
+    exit 1
+fi
+echo "Using Cargo from ${CARGO}"
 
 MUSL_DOWNLOAD_PATH="${DOWNLOAD_DIR}/musl.tar.gz"
 MUSL_RESULT="${EXT_BASE}/musl"
@@ -155,7 +155,7 @@ clean () {
         popd
     done
     make clean -C ${BASE_DIR}/native
-    rm -rf ${BASE_DIR}/target 
+    rm -rf ${BASE_DIR}/target
 }
 
 UNWIND_BUILD="${TOOLS_BASE}"/libunwind

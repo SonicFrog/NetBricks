@@ -1,43 +1,31 @@
+#![feature(integer_atomics)]
 #![feature(box_syntax)]
 #![feature(asm)]
 extern crate e2d2;
 extern crate fnv;
 extern crate getopts;
+extern crate logmap;
 extern crate rand;
 extern crate time;
+
 use e2d2::config::{basic_opts, read_matches};
-use e2d2::interface::*;
 use e2d2::operators::*;
-use e2d2::queues::*;
 use e2d2::scheduler::*;
 use std::env;
-use std::fmt::Display;
+use std::net::Ipv4Addr;
 use std::process;
+use std::str::from_utf8;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+
 mod nf;
-use self::nf::*;
+use self::nf::UdpStack;
+
+use self::logmap::LoanMap;
 
 const CONVERSION_FACTOR: f64 = 1000000000.;
 
-fn test<T, S>(ports: Vec<T>, sched: &mut S)
-where
-    T: PacketRx + PacketTx + Display + Clone + 'static,
-    S: Scheduler + Sized,
-{
-    if ports.len() > 1 {
-        panic!("Currently this pipeline cannot handle more than one port per pipeline");
-    }
-    println!("Sending started");
-
-    let (producer, consumer) = new_mpsc_queue_pair();
-    let pipeline = consumer.send(ports[0].clone());
-    let creator = PacketCreator::new(producer);
-
-    sched.add_task(creator).unwrap();
-    sched.add_task(pipeline).unwrap();
-}
 
 fn main() {
     let opts = basic_opts();
@@ -52,8 +40,44 @@ fn main() {
     match initialize_system(&configuration) {
         Ok(mut context) => {
             context.start_schedulers();
-            context.add_pipeline_to_run(Arc::new(move |p, s: &mut StandaloneScheduler| test(p, s)));
-            context.execute();
+            context.add_pipeline_to_run(Arc::new(|p, s: &mut StandaloneScheduler| {
+                let kv_store: Arc<LoanMap<String, u32>> = Arc::new(LoanMap::new());
+                let socket_setup = |stack: Arc<UdpStack<_>>| {
+                    let local_kv = kv_store.clone();
+                    let read_cb = box move |bytes: &[u8], addr: &Ipv4Addr, port: u16| {
+                        println!("received {} bytes from {}:{}",
+                                 bytes.len(), addr, port);
+
+                        if let Ok(query) = from_utf8(bytes) {
+                            if query.starts_with("PUT") {
+                                if let Some(idx) = query.find(" ") {
+                                    let (keys, value): (Vec<String>, Vec<String>) =
+                                        query
+                                        .split(" ")
+                                        .skip(1)
+                                        .enumerate()
+                                        .partition(|&(i, val)| i % 2 == 0);
+
+                                    keys.iter().zip(values.iter()).for_each(|(k, v)| {
+                                        local_kv.put(k, v);
+                                    });
+                                }
+                            } else if query.starts_with("GET") {
+                                // TODO: process GET queries
+                            } else if query.starts_with("PUT") {
+                                println!("{}", local_kv);
+                            }
+                        }
+                    };
+                    let socket = stack.bind(Ipv4Addr::new(10, 10, 10, 10), 9999,
+                                            Arc::new(read_cb));
+
+                    Ok(())
+                };
+
+                UdpStack::run_stack_on(p, s, socket_setup);
+            }));
+             context.execute();
 
             let mut pkts_so_far = (0, 0);
             let mut last_printed = 0.;
