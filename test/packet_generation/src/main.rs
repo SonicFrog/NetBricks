@@ -42,42 +42,30 @@ fn main() {
             context.start_schedulers();
             context.add_pipeline_to_run(Arc::new(|p, s: &mut StandaloneScheduler| {
                 let kv_store: Arc<LoanMap<String, u32>> = Arc::new(LoanMap::new());
-                let socket_setup = |stack: Arc<UdpStack<_>>| {
+                let socket_setup = move |stack: &UdpStack<_>| {
                     let local_kv = kv_store.clone();
-                    let read_cb = box move |bytes: &[u8], addr: &Ipv4Addr, port: u16| {
-                        println!("received {} bytes from {}:{}",
-                                 bytes.len(), addr, port);
+                    let read_cb = |bytes: &[u8], addr: Ipv4Addr, port: u16| {
+                            println!("received {} bytes from {}:{}",
+                                     bytes.len(), addr, port);
 
-                        if let Ok(query) = from_utf8(bytes) {
-                            if query.starts_with("PUT") {
-                                if let Some(idx) = query.find(" ") {
-                                    let (keys, value): (Vec<String>, Vec<String>) =
-                                        query
-                                        .split(" ")
-                                        .skip(1)
-                                        .enumerate()
-                                        .partition(|&(i, val)| i % 2 == 0);
-
-                                    keys.iter().zip(values.iter()).for_each(|(k, v)| {
-                                        local_kv.put(k, v);
-                                    });
+                            if let Ok(query) = from_utf8(bytes) {
+                                if query.starts_with("PUT") {
+                                    // TODO: process PUT queries
+                                } else if query.starts_with("GET") {
+                                    // TODO: process GET queries
+                                } else if query.starts_with("DEBUG") {
+                                    // TODO: debug print of key value store
                                 }
-                            } else if query.starts_with("GET") {
-                                // TODO: process GET queries
-                            } else if query.starts_with("PUT") {
-                                println!("{}", local_kv);
                             }
-                        }
-                    };
-                    let socket = stack.bind(Ipv4Addr::new(10, 10, 10, 10), 9999,
-                                            Arc::new(read_cb));
+                        };
+                    let socket = stack.bind(Ipv4Addr::new(10, 10, 10, 10), 9999, read_cb);
 
                     Ok(())
                 };
 
                 UdpStack::run_stack_on(p, s, socket_setup);
             }));
-             context.execute();
+            context.execute();
 
             let mut pkts_so_far = (0, 0);
             let mut last_printed = 0.;
