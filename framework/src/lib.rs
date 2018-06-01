@@ -47,7 +47,7 @@ extern crate error_chain;
 #[cfg(unix)]
 extern crate nix;
 #[allow(dead_code)]
-mod native;
+pub mod native;
 mod native_include;
 pub mod allocators;
 pub mod headers;
