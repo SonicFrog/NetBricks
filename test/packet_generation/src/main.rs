@@ -1,4 +1,5 @@
 #![feature(integer_atomics)]
+#![feature(try_from)]
 #![feature(box_syntax)]
 #![feature(asm)]
 extern crate e2d2;
@@ -9,23 +10,67 @@ extern crate rand;
 extern crate time;
 
 use e2d2::config::{basic_opts, read_matches};
-use e2d2::operators::*;
+use e2d2::headers::NullHeader;
 use e2d2::scheduler::*;
+use e2d2::interface::Packet;
+
 use std::env;
+use std::hash::{Hasher, Hash};
 use std::net::Ipv4Addr;
 use std::process;
-use std::str::from_utf8;
+use std::ops::Deref;
+use std::str::from_utf8_unchecked;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 mod nf;
-use self::nf::UdpStack;
+mod r2p2;
+use self::r2p2::{R2P2Server, R2P2Response, R2P2Header};
 
-use self::logmap::LoanMap;
+use self::logmap::OptiMap;
 
 const CONVERSION_FACTOR: f64 = 1000000000.;
 
+/// Wrapper to extract a key from a sequence of packets
+struct KeyPacket {
+    pkt: Vec<Packet<NullHeader, u32>>,
+}
+
+impl PartialEq for KeyPacket {
+    fn eq(&self, other: &Self) -> bool {
+        *self == *other
+    }
+}
+
+impl Deref for KeyPacket {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { from_utf8_unchecked(self.pkt[0].get_payload()) }
+    }
+}
+
+impl Hash for KeyPacket {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (*self).hash(state)
+    }
+}
+
+/// Wrapper to extract a value from a sequence of packets
+struct ValuePacket {
+    pkt: Vec<Packet<NullHeader, u32>>,
+    start: usize,
+    in_start: usize,
+}
+
+impl Deref for ValuePacket {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { from_utf8_unchecked(self.pkt[0].get_payload()) }
+    }
+}
 
 fn main() {
     let opts = basic_opts();
@@ -39,31 +84,19 @@ fn main() {
 
     match initialize_system(&configuration) {
         Ok(mut context) => {
+            let kv: Arc<OptiMap<KeyPacket, ValuePacket, _>> = Arc::new(OptiMap::new());
+
             context.start_schedulers();
             context.add_pipeline_to_run(Arc::new(|p, s: &mut StandaloneScheduler| {
-                let kv_store: Arc<LoanMap<String, u32>> = Arc::new(LoanMap::new());
-                let socket_setup = move |stack: &UdpStack<_>| {
-                    let local_kv = kv_store.clone();
-                    let read_cb = |bytes: &[u8], addr: Ipv4Addr, port: u16| {
-                            println!("received {} bytes from {}:{}",
-                                     bytes.len(), addr, port);
+                let local_kv = Arc::clone(&kv);
 
-                            if let Ok(query) = from_utf8(bytes) {
-                                if query.starts_with("PUT") {
-                                    // TODO: process PUT queries
-                                } else if query.starts_with("GET") {
-                                    // TODO: process GET queries
-                                } else if query.starts_with("DEBUG") {
-                                    // TODO: debug print of key value store
-                                }
-                            }
-                        };
-                    let socket = stack.bind(Ipv4Addr::new(10, 10, 10, 10), 9999, read_cb);
+                R2P2Server::new(p, s, box move |req| {
+                    let packets = Vec::new();
 
-                    Ok(())
-                };
+                    // TODO: actually send some packets
 
-                UdpStack::run_stack_on(p, s, socket_setup);
+                    R2P2Response::new(packets, req.src(), req.src_port())
+                }, Ipv4Addr::new(10, 10, 10, 10), 9000); // listen on 10.10.10.10:9000
             }));
             context.execute();
 
