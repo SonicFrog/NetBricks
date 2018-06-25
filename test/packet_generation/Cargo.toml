@@ -10,7 +10,7 @@ getopts = "*"
 rand = "0.3"
 fnv = "*"
 owning_ref = "*"
-logmap = "0.1.0"
+logmap = { path = "../../../fictional-engine/" }
 
 [features]
 default = []

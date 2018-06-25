@@ -10,66 +10,135 @@ extern crate rand;
 extern crate time;
 
 use e2d2::config::{basic_opts, read_matches};
-use e2d2::headers::NullHeader;
+use e2d2::common::*;
+use e2d2::headers::*;
+use e2d2::interface::*;
+use e2d2::native::zcsi::chain_pkts;
+use e2d2::operators::*;
 use e2d2::scheduler::*;
+use e2d2::queues::*;
 use e2d2::interface::Packet;
 
 use std::env;
-use std::hash::{Hasher, Hash};
-use std::net::Ipv4Addr;
+use std::fmt::Display;
+
 use std::process;
-use std::ops::Deref;
-use std::str::from_utf8_unchecked;
+use std::net::Ipv4Addr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-
-mod nf;
-mod r2p2;
-use self::r2p2::{R2P2Server, R2P2Response, R2P2Header};
 
 use self::logmap::OptiMap;
 
 const CONVERSION_FACTOR: f64 = 1000000000.;
 
-/// Wrapper to extract a key from a sequence of packets
-struct KeyPacket {
-    pkt: Vec<Packet<NullHeader, u32>>,
+pub struct PacketCreator {
+    mac: MacHeader,
+    ip: IpHeader,
+    udp: UdpHeader,
+    producer: MpscProducer,
 }
 
-impl PartialEq for KeyPacket {
-    fn eq(&self, other: &Self) -> bool {
-        *self == *other
+impl PacketCreator {
+    pub fn new(producer: MpscProducer) -> PacketCreator {
+        let mut mac = MacHeader::new();
+
+        mac.dst = MacAddress {
+            addr: [ 0xb8, 0xca, 0x3a, 0x69, 0xcd, 0x78 ],
+        };
+
+        mac.src = MacAddress {
+            addr: [ 0xb8, 0xca, 0x3a, 0x69, 0xcd, 0x79 ],
+        };
+
+        mac.set_etype(0x8000);
+
+        let mut ip = IpHeader::new();
+        ip.set_src(u32::from(Ipv4Addr::from_str("10.10.10.11").unwrap()));
+        ip.set_dst(u32::from(Ipv4Addr::from_str("10.10.10.12").unwrap()));
+        ip.set_ttl(128);
+        ip.set_version(4);
+        ip.set_ihl(5);
+        ip.set_length(20);
+
+        let mut udp = UdpHeader::new();
+
+
+        udp.set_src_port(9000);
+        udp.set_dst_port(9001);
+
+        PacketCreator {
+            mac: mac,
+            ip: ip,
+            udp: udp,
+            producer: producer,
+        }
+    }
+
+    fn init_packet(&self, pkt: Packet<NullHeader, EmptyMetadata>) -> Packet<UdpHeader, EmptyMetadata> {
+        let hdr = new_packet().unwrap();
+        let mut payload = pkt;
+
+        let hdr = hdr.push_header(&self.mac)
+            .unwrap()
+            .push_header(&self.ip)
+            .unwrap()
+            .push_header(&self.udp)
+            .unwrap();
+        {
+            let bytes = payload.get_mut_payload();
+
+            bytes[0] = 0x01;
+            bytes[1] = 0x02;
+            bytes[2] = 0x03;
+        }
+
+        let mbuf_p = unsafe { payload.get_mbuf() };
+        let mbuf_h = unsafe { hdr.get_mbuf() };
+
+        unsafe {
+            if chain_pkts(mbuf_h, mbuf_p) != 0 {
+                panic!("failed to chain mbufs");
+            }
+
+            packet_from_mbuf(mbuf_h, 0)
+        }
+    }
+
+    pub fn create_packet(&self) -> Packet<UdpHeader, EmptyMetadata> {
+        self.init_packet(new_packet().unwrap())
     }
 }
 
-impl Deref for KeyPacket {
-    type Target = str;
+impl Executable for PacketCreator {
+    fn execute(&mut self) {
+        for _ in 0..16 {
+            self.producer.enqueue_one(self.create_packet());
+        }
+    }
 
-    fn deref(&self) -> &Self::Target {
-        unsafe { from_utf8_unchecked(self.pkt[0].get_payload()) }
+    fn dependencies(&mut self) -> Vec<usize> {
+        vec![]
     }
 }
 
-impl Hash for KeyPacket {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        (*self).hash(state)
+fn test<T, S>(ports: Vec<T>, sched: &mut S)
+    where
+    T: PacketRx + PacketTx + Display + Clone + 'static,
+    S: Scheduler + Sized,
+{
+    if ports.len() > 1 {
+        panic!("more than one port");
     }
-}
 
-/// Wrapper to extract a value from a sequence of packets
-struct ValuePacket {
-    pkt: Vec<Packet<NullHeader, u32>>,
-    start: usize,
-    in_start: usize,
-}
+    println!("sending started");
 
-impl Deref for ValuePacket {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { from_utf8_unchecked(self.pkt[0].get_payload()) }
-    }
+    let (producer, consumer) = new_mpsc_queue_pair();
+    let pipeline = consumer.send(ports[0].clone());
+    let creator = PacketCreator::new(producer);
+    sched.add_task(creator).unwrap();
+    sched.add_task(pipeline).unwrap();
 }
 
 fn main() {
@@ -84,19 +153,9 @@ fn main() {
 
     match initialize_system(&configuration) {
         Ok(mut context) => {
-            let kv: Arc<OptiMap<KeyPacket, ValuePacket, _>> = Arc::new(OptiMap::new());
-
             context.start_schedulers();
-            context.add_pipeline_to_run(Arc::new(|p, s: &mut StandaloneScheduler| {
-                let local_kv = Arc::clone(&kv);
-
-                R2P2Server::new(p, s, box move |req| {
-                    let packets = Vec::new();
-
-                    // TODO: actually send some packets
-
-                    R2P2Response::new(packets, req.src(), req.src_port())
-                }, Ipv4Addr::new(10, 10, 10, 10), 9000); // listen on 10.10.10.10:9000
+            context.add_pipeline_to_run(Arc::new(move |p, s: &mut StandaloneScheduler| {
+                test(p, s)
             }));
             context.execute();
 

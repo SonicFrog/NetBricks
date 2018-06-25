@@ -6,6 +6,8 @@ use std::mem::size_of;
 use std::ptr;
 use std::slice;
 
+use headers::*;
+
 /// A packet is a safe wrapper around mbufs, that can be allocated and manipulated.
 /// We associate a header type with a packet to allow safe insertion of headers.
 #[cfg(not(feature = "packet_offset"))]
@@ -15,6 +17,56 @@ pub struct Packet<T: EndOffset, M: Sized + Send> {
     _phantom_m: PhantomData<M>,
     header: *mut T,
     offset: usize,
+}
+
+/// A packet that can cross thread boundaries safely
+/// This is useful for storing packets and retrieving them later
+/// from a different thread
+pub struct CrossPacket {
+    payload: *const MBuf,
+}
+
+impl CrossPacket {
+    pub fn new(payload: *const MBuf) -> CrossPacket {
+        CrossPacket {
+            payload: payload,
+        }
+    }
+
+    /// Converts this packet to a packet suitable for thread local
+    /// header insertion
+    pub fn as_packet(&self) -> Packet<NullHeader, EmptyMetadata> {
+        unsafe {
+            let hdr = mbuf_alloc();
+
+            if chain_pkts(hdr, self.payload as *mut MBuf) != 0 {
+                panic!("failed to chain packet");
+            }
+
+            packet_from_mbuf(hdr, 0)
+        }
+    }
+}
+
+impl<M: Sized + Send> From<Packet<UdpHeader, M>> for CrossPacket {
+    fn from(pkt: Packet<UdpHeader, M>) -> Self {
+        let hdr_sz = IpHeader::size() + UdpHeader::size() + MacHeader::size();
+        let mbuf = unsafe { &mut *pkt.mbuf };
+
+        // remove headers from original packet to allow headers to be in a
+        // separate mbuf later
+        mbuf.remove_data_beginning(hdr_sz);
+
+        CrossPacket::new(mbuf as *const MBuf)
+    }
+}
+
+impl Clone for CrossPacket {
+    /// Be aware that failure to allocate while cloning a CrossPacket
+    /// will result in a panic!
+    fn clone(&self) -> Self {
+        CrossPacket::new(self.payload as *mut MBuf)
+    }
 }
 
 #[inline]

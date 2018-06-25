@@ -183,6 +183,18 @@ void free_pmd_port(int port) {
     rte_eth_dev_close(port);
 }
 
+struct rte_mbuf* mbuf_free_seg(struct rte_mbuf *header) {
+    struct rte_mbuf* payload = rte_pktmbuf_lastseg(header);
+
+    rte_pktmbuf_free_seg(header);
+
+    return payload;
+}
+
+int chain_pkts(struct rte_mbuf *header, struct rte_mbuf *payload) {
+    return rte_pktmbuf_chain(header, payload);
+}
+
 int recv_pkts(int port, int qid, mbuf_array_t pkts, int len) {
     int ret = rte_eth_rx_burst(port, qid, (struct rte_mbuf**)pkts, len);
 /* Removed prefetching since the benefit in performance for single core was
