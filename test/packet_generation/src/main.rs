@@ -64,7 +64,6 @@ impl PacketCreator {
 
         let mut udp = UdpHeader::new();
 
-
         udp.set_src_port(9000);
         udp.set_dst_port(9001);
 
@@ -80,19 +79,21 @@ impl PacketCreator {
         let hdr = new_packet().unwrap();
         let mut payload = pkt;
 
+        payload.add_to_payload_tail(500).unwrap();
+
         let hdr = hdr.push_header(&self.mac)
             .unwrap()
             .push_header(&self.ip)
             .unwrap()
             .push_header(&self.udp)
             .unwrap();
-        {
-            let bytes = payload.get_mut_payload();
+        // {
+        //     let bytes = payload.get_mut_payload();
 
-            bytes[0] = 0x01;
-            bytes[1] = 0x02;
-            bytes[2] = 0x03;
-        }
+        //     bytes[0] = 0x01;
+        //     bytes[1] = 0x02;
+        //     bytes[2] = 0x03;
+        // }
 
         let mbuf_p = unsafe { payload.get_mbuf() };
         let mbuf_h = unsafe { hdr.get_mbuf() };
@@ -132,13 +133,20 @@ fn test<T, S>(ports: Vec<T>, sched: &mut S)
         panic!("more than one port");
     }
 
+    assert!(ports.len() > 0);
+
     println!("sending started");
 
     let (producer, consumer) = new_mpsc_queue_pair();
     let pipeline = consumer.send(ports[0].clone());
     let creator = PacketCreator::new(producer);
-    sched.add_task(creator).unwrap();
-    sched.add_task(pipeline).unwrap();
+
+    if let Err(_) = sched.add_task(creator) {
+        panic!("failed to add packet creator to scheduler");
+    }
+    if let Err(_) = sched.add_task(pipeline).unwrap() {
+        panic!("failed to sending pipeline to scheduler");
+    }
 }
 
 fn main() {
