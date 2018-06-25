@@ -1,4 +1,4 @@
-use alloc::heap::{Alloc, Global, Layout, Opaque};
+use std::alloc::{Alloc, Global, Layout};
 use std::fmt;
 use std::mem::size_of;
 use std::ops::{Deref, DerefMut};
@@ -18,7 +18,7 @@ impl<T: Sized> Drop for CacheAligned<T> {
     fn drop(&mut self) {
         unsafe {
             Global.dealloc(
-                NonNull::new(self.ptr.as_ptr()).unwrap().as_opaque(),
+                NonNull::<u8>::new(self.ptr.as_ptr() as *mut u8).unwrap(),
                 Layout::from_size_align(size_of::<T>(), CACHE_LINE_SIZE).unwrap(),
             );
         }
