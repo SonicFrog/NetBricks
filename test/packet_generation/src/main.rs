@@ -48,7 +48,7 @@ impl PacketCreator {
         let mut mac = MacHeader::new();
 
         mac.dst = MacAddress {
-            addr: [ 0xb8, 0xca, 0x3a, 0x69, 0xcd, 0x78 ],
+            addr: [ 0xb8, 0xca, 0x3a, 0x69, 0xcc, 0x10 ],
         };
 
         mac.src = MacAddress {
@@ -58,12 +58,12 @@ impl PacketCreator {
         mac.set_etype(0x8000);
 
         let mut ip = IpHeader::new();
-        ip.set_src(u32::from(Ipv4Addr::from_str("10.10.10.11").unwrap()));
-        ip.set_dst(u32::from(Ipv4Addr::from_str("10.10.10.12").unwrap()));
+        ip.set_src(u32::from(Ipv4Addr::from_str("10.90.44.100").unwrap()));
+        ip.set_dst(u32::from(Ipv4Addr::from_str("10.90.44.213").unwrap()));
         ip.set_ttl(128);
         ip.set_version(4);
         ip.set_ihl(5);
-        ip.set_length(20);
+        ip.set_length(520);
 
         let mut udp = UdpHeader::new();
 
