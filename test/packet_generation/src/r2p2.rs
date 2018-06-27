@@ -351,6 +351,7 @@ impl R2P2Request {
 impl Index<usize> for R2P2Request {
     type Output = u8;
 
+    #[inline]
     fn index(&self, idx: usize) -> &Self::Output {
         let mut pkt_idx = 0;
         let mut byte_idx = 0;

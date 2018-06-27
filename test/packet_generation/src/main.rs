@@ -29,6 +29,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+mod nf;
+mod r2p2;
+
 use self::logmap::OptiMap;
 
 const CONVERSION_FACTOR: f64 = 1000000000.;
@@ -76,7 +79,10 @@ impl PacketCreator {
     }
 
     fn init_packet(&self, pkt: Packet<NullHeader, EmptyMetadata>) -> Packet<UdpHeader, EmptyMetadata> {
-        let hdr = new_packet().unwrap();
+        let hdr = match new_packet() {
+            Some(pkt) => pkt,
+            None => panic!("unable to allocate packet"),
+        };
         let mut payload = pkt;
 
         payload.add_to_payload_tail(500).unwrap();
@@ -87,13 +93,14 @@ impl PacketCreator {
             .unwrap()
             .push_header(&self.udp)
             .unwrap();
-        // {
-        //     let bytes = payload.get_mut_payload();
 
-        //     bytes[0] = 0x01;
-        //     bytes[1] = 0x02;
-        //     bytes[2] = 0x03;
-        // }
+        {
+            let bytes = payload.get_mut_payload();
+
+            bytes[0] = 0x01;
+            bytes[1] = 0x02;
+            bytes[2] = 0x03;
+        }
 
         let mbuf_p = unsafe { payload.get_mbuf() };
         let mbuf_h = unsafe { hdr.get_mbuf() };
@@ -108,7 +115,11 @@ impl PacketCreator {
     }
 
     pub fn create_packet(&self) -> Packet<UdpHeader, EmptyMetadata> {
-        self.init_packet(new_packet().unwrap())
+        if let Some(pkt) = new_packet() {
+            self.init_packet(pkt)
+        } else {
+            panic!("unable to allocate new packet");
+        }
     }
 }
 
@@ -144,7 +155,8 @@ fn test<T, S>(ports: Vec<T>, sched: &mut S)
     if let Err(_) = sched.add_task(creator) {
         panic!("failed to add packet creator to scheduler");
     }
-    if let Err(_) = sched.add_task(pipeline).unwrap() {
+
+    if let Err(_) = sched.add_task(pipeline) {
         panic!("failed to sending pipeline to scheduler");
     }
 }
