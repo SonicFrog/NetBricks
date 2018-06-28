@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <rte_config.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
@@ -116,6 +117,7 @@ int init_pmd_port(int port, int rxqs, int txqs, int rxq_core[], int txq_core[], 
     struct rte_eth_conf eth_conf;
     struct rte_eth_rxconf eth_rxconf;
     struct rte_eth_txconf eth_txconf;
+    struct rte_eth_link eth_link;
     int ret, i;
 
     /* Need to accesss rte_eth_devices manually since DPDK currently
@@ -175,6 +177,20 @@ int init_pmd_port(int port, int rxqs, int txqs, int rxq_core[], int txq_core[], 
         printf("Failed to start \n");
         return ret; /* Clean up things */
     }
+
+    rte_eth_link_get(port, &eth_link);
+    switch (eth_link.link_status) {
+    case ETH_LINK_DOWN:
+        printf("Port %d is down!\n", port);
+        exit(1);
+    case ETH_LINK_UP:
+        printf("Port %d is up at %dMbps!\n", port, eth_link.link_speed);
+        break;
+    default:
+        printf("Unknown link status!");
+        exit(2);
+    }
+
     return 0;
 }
 
@@ -208,7 +224,9 @@ int recv_pkts(int port, int qid, mbuf_array_t pkts, int len) {
 }
 
 int send_pkts(int port, int qid, mbuf_array_t pkts, int len) {
-    return rte_eth_tx_burst(port, (uint16_t)qid, (struct rte_mbuf**)pkts, (uint16_t)len);
+    int count = rte_eth_tx_burst(port, (uint16_t)qid, (struct rte_mbuf**)pkts, (uint16_t)len);
+
+    return count;
 }
 
 int find_port_with_pci_address(const char* pci) {

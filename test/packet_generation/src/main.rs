@@ -13,7 +13,7 @@ use e2d2::config::{basic_opts, read_matches};
 use e2d2::common::*;
 use e2d2::headers::*;
 use e2d2::interface::*;
-use e2d2::native::zcsi::chain_pkts;
+use e2d2::native::zcsi::{chain_pkts, mbuf_alloc};
 use e2d2::operators::*;
 use e2d2::scheduler::*;
 use e2d2::queues::*;
@@ -23,14 +23,12 @@ use std::env;
 use std::fmt::Display;
 
 use std::process;
+use std::mem;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-
-mod nf;
-mod r2p2;
 
 use self::logmap::OptiMap;
 
@@ -52,21 +50,23 @@ impl PacketCreator {
         };
 
         mac.src = MacAddress {
-            addr: [ 0xb8, 0xca, 0x3a, 0x69, 0xcd, 0x79 ],
+            addr: [ 0xb8, 0xca, 0x3a, 0x69, 0xb8, 0x98 ],
         };
 
-        mac.set_etype(0x8000);
+        mac.set_etype(0x0800);
 
         let mut ip = IpHeader::new();
-        ip.set_src(u32::from(Ipv4Addr::from_str("10.90.44.100").unwrap()));
+        ip.set_src(u32::from(Ipv4Addr::from_str("10.90.44.214").unwrap()));
         ip.set_dst(u32::from(Ipv4Addr::from_str("10.90.44.213").unwrap()));
         ip.set_ttl(128);
         ip.set_version(4);
         ip.set_ihl(5);
         ip.set_length(520);
+        ip.set_protocol(17); // this is udp
 
         let mut udp = UdpHeader::new();
 
+        udp.set_length(500);
         udp.set_src_port(9000);
         udp.set_dst_port(9001);
 
@@ -79,54 +79,48 @@ impl PacketCreator {
     }
 
     fn init_packet(&self, pkt: Packet<NullHeader, EmptyMetadata>) -> Packet<UdpHeader, EmptyMetadata> {
-        let hdr = match new_packet() {
-            Some(pkt) => pkt,
-            None => panic!("unable to allocate packet"),
-        };
-        let mut payload = pkt;
-
-        payload.add_to_payload_tail(500).unwrap();
-
-        let hdr = hdr.push_header(&self.mac)
+        pkt.push_header(&self.mac)
             .unwrap()
             .push_header(&self.ip)
             .unwrap()
             .push_header(&self.udp)
-            .unwrap();
+            .unwrap()
+    }
+
+    pub fn create_packet(&self) -> Packet<UdpHeader, EmptyMetadata> {
+        let header = new_packet().unwrap();
+        let mut payload = new_packet().unwrap();
+        let header = self.init_packet(header);
+
+        payload.add_to_payload_tail(490);
 
         {
             let bytes = payload.get_mut_payload();
 
-            bytes[0] = 0x01;
-            bytes[1] = 0x02;
-            bytes[2] = 0x03;
+            for i in 0..bytes.len(){
+                bytes[i] = 0x41;
+            }
         }
-
-        let mbuf_p = unsafe { payload.get_mbuf() };
-        let mbuf_h = unsafe { hdr.get_mbuf() };
 
         unsafe {
+            let (mbuf_h, mbuf_p) = (header.get_mbuf(), payload.get_mbuf());
+
             if chain_pkts(mbuf_h, mbuf_p) != 0 {
-                panic!("failed to chain mbufs");
+                panic!("chain_pkts failed: chain too long");
             }
 
-            packet_from_mbuf(mbuf_h, 0)
-        }
-    }
-
-    pub fn create_packet(&self) -> Packet<UdpHeader, EmptyMetadata> {
-        if let Some(pkt) = new_packet() {
-            self.init_packet(pkt)
-        } else {
-            panic!("unable to allocate new packet");
+            packet_from_mbuf_no_increment(mbuf_h, 0)
         }
     }
 }
 
 impl Executable for PacketCreator {
     fn execute(&mut self) {
+        println!("sending batch of 16 packets");
+
         for _ in 0..16 {
-            self.producer.enqueue_one(self.create_packet());
+            let pkt = self.create_packet();
+            self.producer.enqueue_one(pkt);
         }
     }
 

@@ -104,6 +104,8 @@ static int init_eal(char* name, int secondary, int core, int mempool_size, char*
     add_arg(&rte_argc, rte_argv, name);
     add_arg(&rte_argc, rte_argv, "-c");
     add_arg(&rte_argc, rte_argv, opt_lcore_bitmap);
+    add_arg(&rte_argc, rte_argv, "--log-level=9");
+
 
     for (int i = 0; i < wl_count; i++) {
         add_arg(&rte_argc, rte_argv, "-w");
