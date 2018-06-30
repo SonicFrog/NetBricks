@@ -36,6 +36,17 @@ impl MBuf {
     }
 
     #[inline]
+    pub fn next(&self) -> *mut MBuf {
+        self.next
+    }
+
+    #[inline]
+    pub fn atomic_refcnt_dec(&mut self) -> u16 {
+        self.refcnt -=1;
+        self.refcnt
+    }
+
+    #[inline]
     pub fn write_metadata_slot(mbuf: *mut MBuf, slot: usize, value: usize) {
         unsafe {
             let ptr = (mbuf.offset(1) as *mut usize).offset(slot as isize);
@@ -147,6 +158,6 @@ impl MBuf {
 
     #[inline]
     pub fn reference(&mut self) {
-        self.refcnt += 1;
+        self.refcnt += 1
     }
 }

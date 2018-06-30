@@ -52,6 +52,11 @@ pub fn read_matches(matches: &Matches, opts: &Options) -> NetbricksConfiguration
         NetbricksConfiguration::new_with_name(&name[..])
     };
 
+    let configuration = NetbricksConfiguration {
+        dpdk_args: Some("--log-level=9".to_string()),
+        ..configuration
+    };
+
     let configuration = if matches.opt_present("m") {
         NetbricksConfiguration {
             primary_core: matches

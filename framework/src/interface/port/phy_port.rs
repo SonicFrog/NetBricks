@@ -193,7 +193,7 @@ impl PmdPort {
     ) -> Result<Arc<PmdPort>> {
         let loopbackv = i32_from_bool(loopback);
         let tsov = i32_from_bool(tso);
-        let csumoffloadv = i32_from_bool(csumoffload);
+        let csumoffloadv = i32_from_bool(true);
         let max_txqs = unsafe { max_txqs(port) };
         let max_rxqs = unsafe { max_rxqs(port) };
         let actual_rxqs = min(max_rxqs, rxqs);

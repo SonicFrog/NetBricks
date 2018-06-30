@@ -11,6 +11,7 @@ use headers::*;
 /// A packet is a safe wrapper around mbufs, that can be allocated and manipulated.
 /// We associate a header type with a packet to allow safe insertion of headers.
 #[cfg(not(feature = "packet_offset"))]
+#[derive(Debug)]
 pub struct Packet<T: EndOffset, M: Sized + Send> {
     mbuf: *mut MBuf,
     _phantom_t: PhantomData<T>,
@@ -21,13 +22,16 @@ pub struct Packet<T: EndOffset, M: Sized + Send> {
 
 /// A packet that can cross thread boundaries safely
 /// This is useful for storing packets and retrieving them later
-/// from a different thread
+/// from a different thread for sending
 pub struct CrossPacket {
     payload: *const MBuf,
 }
 
 impl CrossPacket {
     pub fn new(payload: *const MBuf) -> CrossPacket {
+        let mut_payload = payload as *mut MBuf;
+        unsafe {&mut *mut_payload}.reference();
+
         CrossPacket {
             payload: payload,
         }
@@ -43,29 +47,36 @@ impl CrossPacket {
                 panic!("failed to chain packet");
             }
 
-            packet_from_mbuf(hdr, 0)
+            packet_from_mbuf_no_increment(hdr, 0)
+        }
+    }
+
+    /// Makes an indirect mbuf from this CrossPacket
+    /// Indirect mbufs are necessary for sending to avoid DPDK
+    /// freeing the mbuf after the send is complete
+    pub fn as_sendable(self) -> CrossPacket {
+        unsafe {
+            let mbuf =  mbuf_alloc();
+
+            if chain_pkts(mbuf, self.payload as *mut MBuf) != 0 {
+                panic!("overflow when chaining");
+            }
+
+            CrossPacket::new(mbuf as *const MBuf)
         }
     }
 }
 
-impl<M: Sized + Send> From<Packet<UdpHeader, M>> for CrossPacket {
+impl<'a, M: Sized + Send> From<Packet<UdpHeader, M>> for CrossPacket {
     fn from(pkt: Packet<UdpHeader, M>) -> Self {
-        let hdr_sz = IpHeader::size() + UdpHeader::size() + MacHeader::size();
-        let mbuf = unsafe { &mut *pkt.mbuf };
+        let hdr_sz = IpHeader::size() + UdpHeader::size() +
+            MacHeader::size();
 
-        // remove headers from original packet to allow headers to be in a
-        // separate mbuf later
-        mbuf.remove_data_beginning(hdr_sz);
+        let mbuf = unsafe { pkt.get_mbuf() };
+
+        unsafe { (&mut *mbuf) }.remove_data_beginning(hdr_sz);
 
         CrossPacket::new(mbuf as *const MBuf)
-    }
-}
-
-impl Clone for CrossPacket {
-    /// Be aware that failure to allocate while cloning a CrossPacket
-    /// will result in a panic!
-    fn clone(&self) -> Self {
-        CrossPacket::new(self.payload as *mut MBuf)
     }
 }
 

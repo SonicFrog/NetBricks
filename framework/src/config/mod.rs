@@ -42,7 +42,7 @@ impl Default for NetbricksConfiguration {
             strict: false,
             secondary: false,
             ports: vec![],
-            dpdk_args: None,
+            dpdk_args: Some("--log-level=9".to_string()),
         }
     }
 }
