@@ -32,6 +32,8 @@ extern "C" {
     pub fn free_pmd_port(port: i32) -> i32;
     pub fn mbuf_free_seg(head: *mut MBuf) -> *mut MBuf;
     pub fn chain_pkts(head: *mut MBuf, tail: *mut MBuf) -> i32;
+    pub fn mbuf_clone(mi: *mut MBuf) -> *mut MBuf;
+    pub fn mbuf_ref(mbuf: *const MBuf) -> u16;
     pub fn recv_pkts(port: i32, qid: i32, pkts: *mut *mut MBuf, len: i32) -> i32;
     pub fn send_pkts(port: i32, qid: i32, pkts: *mut *mut MBuf, len: i32) -> i32;
     pub fn num_pmd_ports() -> i32;

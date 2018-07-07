@@ -46,7 +46,7 @@ struct rte_mbuf mbuf_template[RTE_MAX_LCORE];
 #endif
 
 /* Get mempool for calling thread's socket */
-static inline struct rte_mempool *current_pframe_pool() {
+inline struct rte_mempool *current_pframe_pool() {
     return pframe_pool[MEMPOOL_ID];
 }
 

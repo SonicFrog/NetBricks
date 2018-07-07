@@ -211,6 +211,24 @@ int chain_pkts(struct rte_mbuf *header, struct rte_mbuf *payload) {
     return rte_pktmbuf_chain(header, payload);
 }
 
+struct rte_mbuf* mbuf_clone(struct rte_mbuf *buf) {
+    struct rte_mempool *mp = current_pframe_pool();
+    struct rte_mbuf *clone = rte_pktmbuf_clone(buf, mp);
+
+    return clone;
+}
+
+void mbuf_ref(struct rte_mbuf* mbuf) {
+    rte_pktmbuf_refcnt_update(mbuf, 1);
+}
+
+void mbuf_indirect(struct rte_mbuf *mi, struct rte_mbuf *m) {
+    rte_pktmbuf_attach(mi, m);
+
+    mi->next = m->next;
+    mi->nb_segs = m->nb_segs;
+}
+
 int recv_pkts(int port, int qid, mbuf_array_t pkts, int len) {
     int ret = rte_eth_rx_burst(port, qid, (struct rte_mbuf**)pkts, len);
 /* Removed prefetching since the benefit in performance for single core was

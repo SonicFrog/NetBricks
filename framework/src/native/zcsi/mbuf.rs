@@ -1,15 +1,17 @@
+use super::zcsi::mbuf_ref;
+
 #[repr(C)]
 pub struct MBuf {
-    buf_addr: *mut u8,
+    pub buf_addr: *mut u8,
     phys_addr: usize,
-    data_off: u16,
+    pub data_off: u16,
     refcnt: u16,
     nb_segs: u8,
     port: u8,
     ol_flags: u64,
     packet_type: u32,
     pkt_len: u32,
-    data_len: u16,
+    pub data_len: u16,
     vlan_tci: u16,
     hash: u64,
     vlan_tci_outer: u32,
@@ -157,7 +159,9 @@ impl MBuf {
     }
 
     #[inline]
-    pub fn reference(&mut self) {
-        self.refcnt += 1
+    pub fn reference(&self) -> u16 {
+        unsafe {
+            mbuf_ref(self as *const MBuf)
+        }
     }
 }
