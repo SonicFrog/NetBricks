@@ -1,28 +1,32 @@
 extern crate e2d2;
 extern crate logmap;
 
+use std::cell::Cell;
+use std::collections::hash_map::RandomState;
 use std::convert::TryFrom;
 use std::fmt;
+use std::fmt::Display;
 use std::marker::PhantomData;
 use std::mem::{size_of, forget, uninitialized};
 use std::net::Ipv4Addr;
+use std::str::from_utf8;
 use std::ptr;
 use std::slice::Iter;
-use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc};
+use std::sync::atomic::{AtomicU64, AtomicPtr, Ordering};
 use std::sync::mpsc::channel;
 
 use e2d2::headers::{EndOffset, UdpHeader};
 use e2d2::interface::*;
 use e2d2::scheduler::Scheduler;
 
-use logmap::LoanMap;
+use logmap::OptiMap;
 
 use super::nf::{UdpSocket, UdpStack};
 
 const FIRST_FLAG: u8 = 0x80;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 #[repr(C, packed)]
 pub struct R2P2Header {
     magic: u8,
@@ -37,7 +41,7 @@ impl fmt::Display for R2P2Header {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "policy {} flags {} req_id {} pkt_id {}",
+            "policy 0x{:02x} flags 0x{:02x} req_id 0x{:04x} pkt_id 0x{:04x}",
             self.policy_type,
             self.flags,
             self.req_id,
@@ -94,6 +98,10 @@ impl R2P2Header {
     #[inline]
     pub fn message_type(&self) -> u8 {
         (self.policy_type & 0xF) >> 4
+    }
+
+    pub fn set_type(&mut self, tp: u8) {
+        self.policy_type = tp & 0xF;
     }
 
     #[inline]
@@ -172,77 +180,76 @@ impl RequestId {
 
 pub struct R2P2Server<T, S>
 where T: PacketTx + PacketRx + Clone + 'static,
-      S: Scheduler + Sized,
+S: Scheduler + Sized,
 {
     /// requests which aren't complete
-    pending_reqs: LoanMap<RequestId, R2P2Request>,
+    pending_reqs: OptiMap<RequestId, R2P2Request, RandomState>,
     /// responses which haven't been ack'ed yet
-    pending_resps: LoanMap<RequestId, R2P2Response>,
+    pending_resps: OptiMap<RequestId, R2P2Response, RandomState>,
 
+    stack: AtomicPtr<UdpStack<T>>,
     /// the socket this server runs on
-    socket: Arc<UdpSocket>,
+    socket: AtomicU64,
     /// the application callback for processing incoming requests
     request_cb: RequestCB,
+    ports: Vec<T>,
 
-    phantom_s: PhantomData<S>,
-    phantom_t: PhantomData<T>,
+    phantom_data: PhantomData<S>,
 }
 
 impl<T, S> R2P2Server<T, S>
 where T: PacketTx + PacketRx + Clone + 'static,
       S: Scheduler + Sized + 'static,
 {
-    pub fn new(ports: Vec<T>,
-               sched: &mut S,
-               request_cb: RequestCB,
-               addr: Ipv4Addr,
-               port: u16) -> Arc<R2P2Server<T, S>>
+    fn handle_udp(s: &Arc<R2P2Server<T, S>>,  pkt: CrossPacket,
+                  addr: Ipv4Addr, port: u16)
     {
-        // FIXME: init is dirty
-        let server: Arc<R2P2Server<T, S>> = Arc::new(unsafe {
-            uninitialized()
-        });
-        let server_clone = Arc::clone(&server);
-        let (tx, rx) = channel();
+        s.udp_in(pkt, addr, port);
+    }
 
-        // this callback should never run before function exits!!
+    pub fn new(ports: Vec<T>,
+                  sched: &mut S,
+                  request_cb: RequestCB,
+                  addr: Ipv4Addr,
+                  port: u16) -> Arc<R2P2Server<T, S>>
+    {
+        let mut srv = Arc::new(R2P2Server {
+            pending_reqs: OptiMap::new(),
+            pending_resps: OptiMap::new(),
+            socket: AtomicU64::new(0),
+            stack: AtomicPtr::new(ptr::null_mut()),
+            request_cb: request_cb,
+            ports: ports.clone(),
+            phantom_data: PhantomData,
+        });
+        let clone = Arc::clone(&srv);
+        let clone2 = Arc::clone(&srv);
+
         let packet_cb = move |pkt: CrossPacket, addr, port| {
-            server_clone.udp_in(pkt, addr, port);
+            R2P2Server::handle_udp(&clone, pkt, addr, port);
         };
 
-        let stack_setup = move |stack: &UdpStack<T>| {
+        let stack_setup = move |stack: &Arc<UdpStack<T>>| {
             let socket = stack.bind(addr, port, packet_cb);
 
-            tx.send(socket).unwrap();
+            clone2.socket.store(socket, Ordering::Relaxed);
+            clone2.stack.store(Arc::into_raw(Arc::clone(stack)) as *mut _,
+                               Ordering::Relaxed);
 
-            Ok(())
+            0
         };
 
         UdpStack::run_stack_on(ports, sched, stack_setup);
 
-        let mut srv = R2P2Server {
-            pending_reqs: LoanMap::new(),
-            pending_resps: LoanMap::new(),
-            socket: rx.recv().unwrap(),
-            request_cb: request_cb,
-            phantom_s: PhantomData,
-            phantom_t: PhantomData,
-        };
-
-        unsafe {
-            let raw = Arc::into_raw(server)
-                .offset((2 * size_of::<AtomicUsize>()) as isize);
-            ptr::copy_nonoverlapping(raw, &mut srv as *mut R2P2Server<T, S>,
-                                     size_of::<R2P2Server<T, S>>());
-            forget(srv);
-            Arc::from_raw(raw)
-        }
+        srv
     }
 
-    fn udp_in(&self, pkt: CrossPacket, src: Ipv4Addr, src_port: u16)
+    fn udp_in(&self, mut pkt: CrossPacket, src: Ipv4Addr, src_port: u16)
     {
-        let mut header: R2P2Header = unsafe { uninitialized() };
-        pkt.get_header(&mut header);
+
+        let header = pkt.get_header::<R2P2Header>().clone();
+
+        pkt.remove_data_head(R2P2Header::size());
 
         let req_id = RequestId {
             id: header.req_id(),
@@ -261,14 +268,17 @@ where T: PacketTx + PacketRx + Clone + 'static,
             MessageType::Ack => self.acked(req_id),
 
             MessageType::Request => {
-                if let Some(mut request) = self.pending_reqs.get_mut(&req_id)
+                if let Some(request) = self.pending_reqs.get(&req_id)
                 {
+                    let mut new_req = request.clone();
                     // we have already received some packets for this request
-                    request.insert(pkt, header);
+                    new_req.insert(pkt, header);
 
                     if request.is_complete() {
                         self.process(request.clone(), src, src_port);
-                        self.pending_reqs.remove(req_id);
+                        self.pending_reqs.delete(&req_id);
+                    } else {
+                        self.pending_reqs.put(req_id.clone(), new_req);
                     }
                 } else {
                     // this is the first packet we receive for this request
@@ -301,23 +311,45 @@ where T: PacketTx + PacketRx + Clone + 'static,
 
     #[inline]
     fn udp_out(&self, resp: R2P2Response, addr: Ipv4Addr, port: u16) -> Result<(), ()> {
-        resp.iter().for_each(|p| self.socket.send(p, &addr, port));
+        let socket = self.socket.load(Ordering::Relaxed);
+        let stack = unsafe { Arc::from_raw(
+            self.stack.load(Ordering::Relaxed)
+        )};
+        let socket = stack.socket_for(socket);
+        let mut i = 0;
+
+        resp.iter().for_each(|p| {
+            let mut header = R2P2Header::new();
+
+            header.set_type(1);
+            header.set_req_id(resp.req_id.id);
+            header.set_pkt_id(i);
+
+            i += 1;
+
+            socket.send(p, &addr, port, header);
+        });
+
+        forget(stack);
         Ok(())
     }
 
     #[inline]
     fn acked(&self, resp: RequestId) {
-        self.pending_resps.remove(resp);
+        self.pending_resps.delete(&resp);
     }
 }
 
 unsafe impl<T, S> Sync for R2P2Server<T, S>
 where T: PacketTx + PacketRx + Clone + 'static,
-S: Scheduler + Sized + 'static {}
+S: Scheduler + Sized,
+{}
+
 
 unsafe impl<T, S> Send for R2P2Server<T, S>
 where T: PacketTx + PacketRx + Clone + 'static,
-S: Scheduler + Sized + 'static {}
+S: Scheduler + Sized,
+{}
 
 pub struct R2P2Request {
     id: RequestId,
@@ -331,6 +363,7 @@ impl R2P2Request {
            src_port: u16) -> R2P2Request
     {
         assert!(R2P2Request::is_first(&header));
+        assert!(header.pkt_id() >= 1);
 
         // avoid resizing by allocating all we need right now
         let mut msgs = Vec::with_capacity(header.pkt_id() as usize);
@@ -340,7 +373,7 @@ impl R2P2Request {
             port: src_port,
         };
 
-        msgs[0] = first;
+        msgs.push(first);
 
         R2P2Request {
             id: id,
@@ -350,7 +383,7 @@ impl R2P2Request {
 
     #[inline]
     fn is_first(header: &R2P2Header) -> bool {
-        header.flags() == FIRST_FLAG
+        (header.flags() & FIRST_FLAG) != 0
     }
 
     #[inline]
@@ -362,9 +395,9 @@ impl R2P2Request {
             return;
         }
 
-        pkt.remove_data_head(size_of::<R2P2Header>() as u16).unwrap();
+        pkt.remove_data_head(size_of::<R2P2Header>());
 
-        self.msgs[idx] = pkt;
+        self.msgs.push(pkt);
     }
 
     pub fn src(&self) -> Ipv4Addr {

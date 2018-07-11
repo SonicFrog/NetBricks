@@ -104,7 +104,6 @@ static int init_eal(char* name, int secondary, int core, int mempool_size, char*
     add_arg(&rte_argc, rte_argv, name);
     add_arg(&rte_argc, rte_argv, "-c");
     add_arg(&rte_argc, rte_argv, opt_lcore_bitmap);
-    add_arg(&rte_argc, rte_argv, "--log-level=9");
 
 
     for (int i = 0; i < wl_count; i++) {
@@ -129,6 +128,10 @@ static int init_eal(char* name, int secondary, int core, int mempool_size, char*
     // Sandy Bridge.
     add_arg(&rte_argc, rte_argv, "--socket-mem");
     add_arg(&rte_argc, rte_argv, opt_socket_mem);
+
+    // debug output
+    add_arg(&rte_argc, rte_argv, "--log-level=9");
+
     rte_argv[rte_argc] = NULL;
 
     /* reset getopt() */

@@ -17,8 +17,8 @@ use std::env;
 use std::process;
 use std::mem;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
-use std::sync::mpsc::channel;
+use std::sync::{RwLock, Arc};
+use std::sync::mpsc::{Sender, channel};
 use std::thread;
 use std::time::Duration;
 
@@ -30,6 +30,13 @@ const CONVERSION_FACTOR: f64 = 1000000000.;
 
 use self::redis::RedisServer;
 
+struct Container<T> {
+    tx: Sender<T>,
+}
+
+unsafe impl<T> Send for Container<T> {}
+unsafe impl<T> Sync for Container<T> {}
+
 fn main() {
     let opts = basic_opts();
 
@@ -39,15 +46,21 @@ fn main() {
         Err(f) => panic!(f.to_string()),
     };
     let configuration = read_matches(&matches, &opts);
+    let (tx, rx) = channel();
+    let sender = Container { tx };
 
     match initialize_system(&configuration) {
         Ok(mut context) => {
             context.start_schedulers();
-            context.add_pipeline_to_run(Arc::new(|p, s: &mut StandaloneScheduler| {
-                let addr = Ipv4Addr::new(10, 10, 10, 10);
-                let server = Arc::new(RedisServer::new(p, s, addr, 9000));
-                mem::forget(server); // prevent the server from being deallocated
+            context.add_pipeline_to_run(Arc::new(move |p, s: &mut StandaloneScheduler| {
+                let addr = Ipv4Addr::new(10, 90, 44, 214);
+                let server = RedisServer::new(p, s, addr, 9000);
+
+                sender.tx.send(server).unwrap();
             }));
+
+            let server = rx.recv().unwrap();
+
             context.execute();
 
             let mut pkts_so_far = (0, 0);

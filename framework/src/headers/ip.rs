@@ -153,7 +153,7 @@ impl IpHeader {
     pub fn set_csum(&mut self, csum: u16) {
         let ttlpcsum = self.ttl_to_csum;
         let blanked = ttlpcsum & !0xffff0000;
-        self.ttl_to_csum = blanked | ((u16::to_be(csum) as u32) << 16);
+        self.ttl_to_csum = blanked | ((csum as u32) << 16);
     }
 
     #[inline]

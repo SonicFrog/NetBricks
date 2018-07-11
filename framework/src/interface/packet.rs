@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 use std::mem::{size_of};
 use std::ptr;
 use std::slice;
+use std::time::{Duration, SystemTime};
 
 use headers::*;
 
@@ -13,7 +14,7 @@ use headers::*;
 #[cfg(not(feature = "packet_offset"))]
 #[derive(Debug, Copy)]
 pub struct Packet<T: EndOffset, M: Sized + Send> {
-    mbuf: *mut MBuf,
+    pub mbuf: *mut MBuf,
     _phantom_t: PhantomData<T>,
     _phantom_m: PhantomData<M>,
     header: *mut T,
@@ -37,66 +38,68 @@ impl<T: EndOffset, M: Sized + Send> Clone for Packet<T, M> {
 /// A packet that can cross thread boundaries safely
 /// This is useful for storing packets and retrieving them later
 /// from a different thread for sending
+#[derive(Debug)]
 pub struct CrossPacket {
     payload: *const MBuf,
-    offset: u16,
-    len: u16,
 }
 
 impl CrossPacket {
     pub fn new(payload: *const MBuf) -> CrossPacket {
         let mut_payload = payload as *mut MBuf;
 
-        let mbuf_ref = unsafe {&mut *mut_payload};
-
-        mbuf_ref.reference();
-
         CrossPacket {
-            len: mbuf_ref.data_len,
-            offset: 0,
             payload: payload,
+        }
+    }
+
+    fn offset(&self) -> usize {
+        unsafe {
+            (*self.payload).data_off as usize
         }
     }
 
     pub fn new_from_raw() -> CrossPacket {
         let mbuf = unsafe { mbuf_alloc() };
 
+        if mbuf.is_null() {
+            panic!("out of memory");
+        }
+
         CrossPacket {
             payload: mbuf as *const MBuf,
-            offset: 0,
-            len: 0,
         }
     }
 
     pub fn add_data_head(&mut self, size: usize) {
-        self.len += size as u16;
-        unsafe {
-            (*(self.payload as *mut MBuf)).data_len += size as u16;
-        }
+        self.mbuf_mut().add_data_beginning(size);
     }
 
-    pub fn remove_data_head(&mut self, size: u16) -> Option<u16> {
-        if size >= self.len {
-            None
-        } else {
-            self.offset += size;
-            Some(size)
-        }
+    pub fn remove_data_head(&mut self, size: usize) {
+        self.mbuf_mut().remove_data_beginning(size);
     }
 
     unsafe fn get_header_raw(&self, size: usize) -> &[u8] {
-        let slice_u8 = self.start_of_data();
-        let header = slice_u8.offset(size as isize);
+        let start = self.mbuf().data_address(0) as *const u8;
 
-        slice::from_raw_parts(header, size)
+        slice::from_raw_parts(start, size)
+    }
+
+    fn mbuf(&self) -> &MBuf {
+        unsafe {
+            &*(self.payload)
+        }
+    }
+
+    fn mbuf_mut(&mut self) -> &mut MBuf {
+        unsafe {
+            &mut*(self.payload as *mut MBuf)
+        }
     }
 
     pub fn get_payload(&self, offset: usize) -> &[u8] {
         unsafe {
-            let data_start = self.start_of_data()
-                .offset(self.offset as isize + offset as isize);
-            let len = (*self.payload).data_len as usize
-                - self.offset as usize - offset;
+            let data_start = self.start_of_data();
+            let len = (*self.payload).data_len as usize;
 
             slice::from_raw_parts(data_start, len as usize)
         }
@@ -104,8 +107,7 @@ impl CrossPacket {
 
     pub fn get_mut_payload(&mut self, offset: usize) -> &mut [u8] {
         unsafe {
-            let slice_u8: *mut u8 = self.start_of_data()
-                .offset(offset as isize) as *mut u8;
+            let slice_u8: *mut u8 = self.start_of_data() as *mut u8;
             let len = (*self.payload).data_len as usize;
 
             slice::from_raw_parts_mut(slice_u8, len)
@@ -113,33 +115,30 @@ impl CrossPacket {
     }
 
     unsafe fn start_of_data(&self) -> *const u8 {
-        let mbuf_off = (*self.payload).data_off;
-        (*self.payload).buf_addr.offset(self.offset as isize +
-                                        mbuf_off as isize)
+        self.mbuf().data_address(0)
     }
 
-    pub fn get_header<T: EndOffset>(&self, out: &mut T) {
-        let size = size_of::<T>();
-        let slice = unsafe { self.get_header_raw(size) };
-
+    pub fn get_header<T: EndOffset>(&self) -> &T {
         unsafe {
-            ptr::copy_nonoverlapping(out, slice.as_ptr() as *mut T, size);
+            &*(self.start_of_data() as *const T)
         }
     }
 
-    pub fn offset(&self) -> u16 {
-        self.offset
-    }
-
     pub fn length(&self) -> u16 {
-        self.len
+        unsafe {
+            (*self.payload).data_len
+        }
     }
 
     /// Converts this packet to a packet suitable for thread local
     /// header insertion
-    pub fn as_segment(&self) -> CrossPacket {
+    pub fn as_segment<H: EndOffset>(&self) -> Packet<H, EmptyMetadata> {
         unsafe {
             let hdr = mbuf_alloc();
+
+            if self.payload.is_null() {
+                panic!("chaining with null mbuf");
+            }
 
             if chain_pkts(hdr, self.payload as *mut MBuf) != 0 {
                 panic!("failed to chain packet");
@@ -148,15 +147,18 @@ impl CrossPacket {
             // prevent DPDK from freeing the payload mbuf after sending
             (*self.payload).reference();
 
-            CrossPacket::new(hdr)
+            packet_from_mbuf_no_increment(hdr, 0)
         }
     }
 
     pub fn to_packet(&self) -> Packet<NullHeader, EmptyMetadata> {
         unsafe {
-            packet_from_mbuf_no_increment(self.payload as *mut MBuf,
-                                          self.offset as usize)
+            packet_from_mbuf_no_increment(self.payload as *mut MBuf, 0)
         }
+    }
+
+    pub fn as_mbuf(self) -> *mut MBuf {
+        self.payload as *mut MBuf
     }
 }
 
@@ -164,6 +166,9 @@ impl Clone for CrossPacket {
     fn clone(&self) -> Self {
         unsafe {
             mbuf_ref(self.payload as *mut MBuf);
+
+            let mbuf = &*self.payload;
+            println!("cloned {:?} {}",  self.payload, mbuf.refcnt);
         }
 
         CrossPacket::new(self.payload)
@@ -173,18 +178,18 @@ impl Clone for CrossPacket {
 impl Drop for CrossPacket {
     fn drop(&mut self) {
         unsafe {
+            let mbuf = &*self.payload;
+            print!("freed {:?}, ", self.payload);
+            println!("refcount: {}", mbuf.refcnt);
             mbuf_free(self.payload as *mut MBuf);
         }
     }
 }
 
-impl<'a, M: Sized + Send> From<&'a Packet<UdpHeader, M>> for CrossPacket {
+impl<'a, M: Sized + Send> From<&'a Packet<UdpHeader, M>> for CrossPacket
+{
     fn from(pkt: &'a Packet<UdpHeader, M>) -> Self {
-        let mbuf_ref = unsafe { &*pkt.mbuf };
-
-        mbuf_ref.reference();
-
-        CrossPacket::new(mbuf_ref as *const MBuf)
+        CrossPacket::new(pkt.mbuf)
     }
 }
 
@@ -425,6 +430,14 @@ impl<T: EndOffset, M: Sized + Send> Packet<T, M> {
         unsafe { (*self.mbuf).data_len() }
     }
 
+    pub fn nb_segs(&self) -> usize {
+        unsafe { (*self.mbuf).nb_segs as usize }
+    }
+
+    pub fn pkt_len(&self) -> usize {
+        unsafe { (*self.mbuf).pkt_len() }
+    }
+
     #[inline]
     fn payload_size(&self) -> usize {
         self.data_len() - self.offset() - self.payload_offset()
@@ -490,6 +503,7 @@ impl<T: EndOffset, M: Sized + Send> Packet<T, M> {
                 } else {
                     self.payload() as *mut T2
                 };
+
                 ptr::copy_nonoverlapping(hdr, dst, 1);
                 Some(create_packet(self.get_mbuf_ref(), dst, offset))
             } else {

@@ -14,35 +14,35 @@ use e2d2::scheduler::*;
 use e2d2::interface::*;
 
 pub struct RedisServer<T, S>
-    where T: PacketTx + PacketRx + Clone + 'static,
-          S: Scheduler + Sized + 'static,
+where T: PacketTx + PacketRx + Clone + 'static,
+      S: Scheduler + Sized,
 {
     kv: OptiMap<String, RedisKVEntry, RandomState>,
     server: Arc<R2P2Server<T, S>>,
 }
 
 impl<T, S> RedisServer<T, S>
-    where T: PacketTx + PacketRx + Clone + 'static,
-          S: Scheduler + Sized + 'static,
+where T: PacketTx + PacketRx + Clone + 'static,
+      S: Sized + Scheduler + 'static,
 {
     pub fn new(ports: Vec<T>,
                sched: &mut S,
                addr: Ipv4Addr,
-               port: u16) -> Arc<RedisServer<T, S>>
+               port: u16)
     {
         println!("settings up redis server {}:{}", addr, port);
 
-        let mut server: Arc<RedisServer<T, S>> = unsafe {
-            mem::uninitialized()
-        };
+        let kv: Arc<OptiMap<String, RedisKVEntry, RandomState>> =
+            Arc::new(OptiMap::with_capacity(512000));
 
-        let r2p2 = R2P2Server::new(ports, sched, box move |req| {
+        let r2p2 = Arc::new(R2P2Server::new(ports, sched, box move |mut req| {
             let req_id = req.id().clone();
             let (key, entry) = RedisKVEntry::new(req);
 
-            if let Some(kv) = entry {
-                server.kv.put(key, kv);
+            if let Some(e) = entry {
                 let mut pkt = CrossPacket::new_from_raw();
+
+                kv.put(key, e);
                 pkt.add_data_head(4);
 
                 {
@@ -55,11 +55,11 @@ impl<T, S> RedisServer<T, S>
                 }
 
                 let mut resp = Vec::with_capacity(1);
-                resp[0] = pkt;
+                resp.push(pkt);
 
                 R2P2Response::new(resp, addr, port, req_id.clone())
             } else {
-                if let Some(value) = server.kv.get(&key) {
+                if let Some(value) = kv.get(&key) {
                     R2P2Response::new(value.pkt.clone(),
                                       addr, port, req_id.clone())
                 } else {
@@ -76,19 +76,15 @@ impl<T, S> RedisServer<T, S>
                     }
 
                     let mut resp = Vec::with_capacity(1);
-                    resp[0] = pkt;
+
+                    resp.push(pkt);
 
                     R2P2Response::new(resp, addr, port, req_id.clone())
                 }
             }
-        }, addr, port);
+        }, addr, port));
 
-        server = Arc::new(RedisServer {
-            server: r2p2,
-            kv: OptiMap::with_capacity(512000),
-        });
-
-        server
+        mem::forget(r2p2);
     }
 }
 
@@ -98,20 +94,39 @@ struct RedisKVEntry {
 
 impl RedisKVEntry {
     fn new(req: R2P2Request) -> (String, Option<RedisKVEntry>) {
-        let pkts = req.pkts();
-        let payload = pkts[0].get_payload(0);
-        let string = unsafe { from_utf8_unchecked(payload) };
+        let mut pkts = req.pkts().clone();
 
-        let split: Vec<&str> = string.split(' ').collect();
+        let mut tpe;
+        let mut key;
+        {
+            let payload = pkts[0].get_payload(0);
+            let string = unsafe { from_utf8_unchecked(payload) };
+            let split: Vec<&str> = string.split("\r\n").collect();
+            tpe = String::from(split[2]);
+            key = String::from(split[4]);
+        }
 
-        // least we can have is GET "key"
-        assert!(split.len() >= 2);
+        match tpe.as_str() {
+            "GET" | "get" => (key, None),
+            "SET" | "set" => {
+                let mut seen = 0;
+                let mut off = 0;
+                {
+                    let payload = pkts[0].get_payload(0);
+                    for i in 0..payload.len() {
+                        let c = payload[i];
 
-        let key = String::from(split[1]);
+                        if c == ('\n' as u8) {
+                            seen += 1;
+                        }
 
-        match split[0] {
-            "GET" => (key, None),
-            "SET" => {
+                        if seen == 5 {
+                            off = i + 1;
+                        }
+                    }
+                }
+                pkts[0].remove_data_head(off);
+
                 let value = RedisKVEntry {
                     pkt: pkts.clone(),
                 };
@@ -120,17 +135,5 @@ impl RedisKVEntry {
             },
             a => panic!("unknown request type: {}", a),
         }
-    }
-}
-
-impl PartialEq for RedisKVEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.pkt[0].get_payload(0) == self.pkt[0].get_payload(0)
-    }
-}
-
-impl Hash for RedisKVEntry {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        self.pkt[0].get_payload(0).hash(hasher);
     }
 }

@@ -87,6 +87,23 @@ int max_txqs(int dev) {
     }
 }
 
+uint16_t ipv4_csum(uint32_t *ipv4_hdr)
+{
+    uint32_t *data32 = ipv4_hdr;
+    uint64_t sum = 0;
+
+    sum += data32[0];
+    sum += data32[1];
+    sum += data32[2];
+    sum += data32[3];
+    sum += data32[4];
+    sum = (sum >> 16) + (sum & 0xffff);
+    sum = (sum >> 16) + (sum & 0xffff);
+    sum = (sum >> 16) + (sum & 0xffff);
+    sum = (sum >> 16) + (sum & 0xffff);
+    return ~sum;
+}
+
 void enumerate_pmd_ports() {
     int num_dpdk_ports = rte_eth_dev_count();
     int i;
@@ -242,9 +259,7 @@ int recv_pkts(int port, int qid, mbuf_array_t pkts, int len) {
 }
 
 int send_pkts(int port, int qid, mbuf_array_t pkts, int len) {
-    int count = rte_eth_tx_burst(port, (uint16_t)qid, (struct rte_mbuf**)pkts, (uint16_t)len);
-
-    return count;
+    return rte_eth_tx_burst(port, (uint16_t)qid, (struct rte_mbuf**)pkts, (uint16_t)len);
 }
 
 int find_port_with_pci_address(const char* pci) {
