@@ -70,10 +70,12 @@ impl CrossPacket {
         }
     }
 
+    #[inline]
     pub fn add_data_head(&mut self, size: usize) {
         self.mbuf_mut().add_data_beginning(size);
     }
 
+    #[inline]
     pub fn remove_data_head(&mut self, size: usize) {
         self.mbuf_mut().remove_data_beginning(size);
     }
@@ -96,6 +98,7 @@ impl CrossPacket {
         }
     }
 
+    #[inline]
     pub fn get_payload(&self, offset: usize) -> &[u8] {
         unsafe {
             let data_start = self.start_of_data();
@@ -105,6 +108,7 @@ impl CrossPacket {
         }
     }
 
+    #[inline]
     pub fn get_mut_payload(&mut self, offset: usize) -> &mut [u8] {
         unsafe {
             let slice_u8: *mut u8 = self.start_of_data() as *mut u8;
@@ -118,12 +122,14 @@ impl CrossPacket {
         self.mbuf().data_address(0)
     }
 
+    #[inline]
     pub fn get_header<T: EndOffset>(&self) -> &T {
         unsafe {
             &*(self.start_of_data() as *const T)
         }
     }
 
+    #[inline]
     pub fn length(&self) -> u16 {
         unsafe {
             (*self.payload).data_len
@@ -132,9 +138,12 @@ impl CrossPacket {
 
     /// Converts this packet to a packet suitable for thread local
     /// header insertion
+    #[inline]
     pub fn as_segment<H: EndOffset>(&self) -> Packet<H, EmptyMetadata> {
         unsafe {
             let hdr = mbuf_alloc();
+
+            assert!((*self.payload).next.is_null());
 
             if self.payload.is_null() {
                 panic!("chaining with null mbuf");

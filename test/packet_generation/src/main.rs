@@ -10,14 +10,12 @@ extern crate rand;
 extern crate time;
 
 use e2d2::config::{basic_opts, read_matches};
-use e2d2::operators::*;
 use e2d2::scheduler::*;
 
 use std::env;
 use std::process;
-use std::mem;
 use std::net::Ipv4Addr;
-use std::sync::{RwLock, Arc};
+use std::sync::Arc;
 use std::sync::mpsc::{Sender, channel};
 use std::thread;
 use std::time::Duration;
@@ -59,7 +57,7 @@ fn main() {
                 sender.tx.send(server).unwrap();
             }));
 
-            let server = rx.recv().unwrap();
+            let _server = rx.recv().unwrap();
 
             context.execute();
 

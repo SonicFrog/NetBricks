@@ -1,7 +1,7 @@
 extern crate logmap;
 
 use std::collections::hash_map::RandomState;
-use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 use std::mem;
 use std::net::Ipv4Addr;
 use std::str::from_utf8_unchecked;
@@ -17,8 +17,8 @@ pub struct RedisServer<T, S>
 where T: PacketTx + PacketRx + Clone + 'static,
       S: Scheduler + Sized,
 {
-    kv: OptiMap<String, RedisKVEntry, RandomState>,
-    server: Arc<R2P2Server<T, S>>,
+    phantom_t: PhantomData<T>,
+    phantom_s: PhantomData<S>,
 }
 
 impl<T, S> RedisServer<T, S>
@@ -35,7 +35,7 @@ where T: PacketTx + PacketRx + Clone + 'static,
         let kv: Arc<OptiMap<String, RedisKVEntry, RandomState>> =
             Arc::new(OptiMap::with_capacity(512000));
 
-        let r2p2 = Arc::new(R2P2Server::new(ports, sched, box move |mut req| {
+        let r2p2 = Arc::new(R2P2Server::new(ports, sched, box move |req| {
             let req_id = req.id().clone();
             let (key, entry) = RedisKVEntry::new(req);
 
@@ -57,11 +57,10 @@ where T: PacketTx + PacketRx + Clone + 'static,
                 let mut resp = Vec::with_capacity(1);
                 resp.push(pkt);
 
-                R2P2Response::new(resp, addr, port, req_id.clone())
+                R2P2Response::new(resp, req_id.clone())
             } else {
                 if let Some(value) = kv.get(&key) {
-                    R2P2Response::new(value.pkt.clone(),
-                                      addr, port, req_id.clone())
+                    R2P2Response::new(value.pkt.clone(), req_id.clone())
                 } else {
                     let mut pkt = CrossPacket::new_from_raw();
                     pkt.add_data_head(4);
@@ -79,7 +78,7 @@ where T: PacketTx + PacketRx + Clone + 'static,
 
                     resp.push(pkt);
 
-                    R2P2Response::new(resp, addr, port, req_id.clone())
+                    R2P2Response::new(resp, req_id.clone())
                 }
             }
         }, addr, port));
@@ -96,8 +95,8 @@ impl RedisKVEntry {
     fn new(req: R2P2Request) -> (String, Option<RedisKVEntry>) {
         let mut pkts = req.pkts().clone();
 
-        let mut tpe;
-        let mut key;
+        let tpe;
+        let key;
         {
             let payload = pkts[0].get_payload(0);
             let string = unsafe { from_utf8_unchecked(payload) };

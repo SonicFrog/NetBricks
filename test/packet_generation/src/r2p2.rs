@@ -1,20 +1,15 @@
 extern crate e2d2;
 extern crate logmap;
 
-use std::cell::Cell;
 use std::collections::hash_map::RandomState;
 use std::convert::TryFrom;
 use std::fmt;
-use std::fmt::Display;
-use std::marker::PhantomData;
-use std::mem::{size_of, forget, uninitialized};
+use std::mem::{size_of, forget};
 use std::net::Ipv4Addr;
-use std::str::from_utf8;
 use std::ptr;
 use std::slice::Iter;
-use std::sync::{Arc};
-use std::sync::atomic::{AtomicU64, AtomicPtr, Ordering};
-use std::sync::mpsc::channel;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, AtomicPtr, Ordering};
 
 use e2d2::headers::{EndOffset, UdpHeader};
 use e2d2::interface::*;
@@ -22,11 +17,11 @@ use e2d2::scheduler::Scheduler;
 
 use logmap::OptiMap;
 
-use super::nf::{UdpSocket, UdpStack};
+use super::nf::UdpStack;
 
 const FIRST_FLAG: u8 = 0x80;
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Copy)]
 #[repr(C, packed)]
 pub struct R2P2Header {
     magic: u8,
@@ -165,62 +160,57 @@ pub struct RequestId {
 }
 
 impl RequestId {
-    fn src_addr(&self) -> u32 {
+    pub fn src_addr(&self) -> u32 {
         self.addr
     }
 
-    fn src_port(&self) -> u16 {
+    pub fn src_port(&self) -> u16 {
         self.port
     }
 
-    fn req_id(&self) -> u16 {
+    pub fn req_id(&self) -> u16 {
         self.id
     }
 }
 
-pub struct R2P2Server<T, S>
-where T: PacketTx + PacketRx + Clone + 'static,
-S: Scheduler + Sized,
+pub struct R2P2Server
 {
     /// requests which aren't complete
     pending_reqs: OptiMap<RequestId, R2P2Request, RandomState>,
     /// responses which haven't been ack'ed yet
     pending_resps: OptiMap<RequestId, R2P2Response, RandomState>,
 
-    stack: AtomicPtr<UdpStack<T>>,
+    /// the udp stack we run on
+    stack: AtomicPtr<UdpStack>,
     /// the socket this server runs on
-    socket: AtomicU64,
+    socket: AtomicU16,
     /// the application callback for processing incoming requests
     request_cb: RequestCB,
-    ports: Vec<T>,
-
-    phantom_data: PhantomData<S>,
 }
 
-impl<T, S> R2P2Server<T, S>
-where T: PacketTx + PacketRx + Clone + 'static,
-      S: Scheduler + Sized + 'static,
+impl R2P2Server
 {
-    fn handle_udp(s: &Arc<R2P2Server<T, S>>,  pkt: CrossPacket,
+    #[inline]
+    fn handle_udp(s: &Arc<R2P2Server>,  pkt: CrossPacket,
                   addr: Ipv4Addr, port: u16)
     {
         s.udp_in(pkt, addr, port);
     }
 
-    pub fn new(ports: Vec<T>,
+    pub fn new<T, S>(ports: Vec<T>,
                   sched: &mut S,
                   request_cb: RequestCB,
                   addr: Ipv4Addr,
-                  port: u16) -> Arc<R2P2Server<T, S>>
+                     port: u16) -> Arc<R2P2Server>
+    where T: PacketTx + PacketRx + Clone + 'static,
+          S: Scheduler + Sized + 'static,
     {
-        let mut srv = Arc::new(R2P2Server {
+        let srv = Arc::new(R2P2Server {
             pending_reqs: OptiMap::new(),
             pending_resps: OptiMap::new(),
-            socket: AtomicU64::new(0),
+            socket: AtomicU16::new(0),
             stack: AtomicPtr::new(ptr::null_mut()),
             request_cb: request_cb,
-            ports: ports.clone(),
-            phantom_data: PhantomData,
         });
         let clone = Arc::clone(&srv);
         let clone2 = Arc::clone(&srv);
@@ -229,7 +219,7 @@ where T: PacketTx + PacketRx + Clone + 'static,
             R2P2Server::handle_udp(&clone, pkt, addr, port);
         };
 
-        let stack_setup = move |stack: &Arc<UdpStack<T>>| {
+        let stack_setup = move |stack: &Arc<UdpStack>| {
             let socket = stack.bind(addr, port, packet_cb);
 
             clone2.socket.store(socket, Ordering::Relaxed);
@@ -275,10 +265,10 @@ where T: PacketTx + PacketRx + Clone + 'static,
                     new_req.insert(pkt, header);
 
                     if request.is_complete() {
-                        self.process(request.clone(), src, src_port);
+                        self.process(new_req, src, src_port);
                         self.pending_reqs.delete(&req_id);
                     } else {
-                        self.pending_reqs.put(req_id.clone(), new_req);
+                        self.pending_reqs.put(req_id, new_req);
                     }
                 } else {
                     // this is the first packet we receive for this request
@@ -321,13 +311,18 @@ where T: PacketTx + PacketRx + Clone + 'static,
         resp.iter().for_each(|p| {
             let mut header = R2P2Header::new();
 
+            if i == 0 {
+                header.set_flags(FIRST_FLAG);
+            }
+
             header.set_type(1);
             header.set_req_id(resp.req_id.id);
             header.set_pkt_id(i);
 
             i += 1;
 
-            socket.send(p, &addr, port, header);
+            socket.send(p, &addr, port, header)
+                .expect("failed to send packets");
         });
 
         forget(stack);
@@ -340,16 +335,16 @@ where T: PacketTx + PacketRx + Clone + 'static,
     }
 }
 
-unsafe impl<T, S> Sync for R2P2Server<T, S>
-where T: PacketTx + PacketRx + Clone + 'static,
-S: Scheduler + Sized,
-{}
+// unsafe impl<T, S> Sync for R2P2Server<T, S>
+// where T: PacketTx + PacketRx + Clone + 'static,
+// S: Scheduler + Sized,
+// {}
 
 
-unsafe impl<T, S> Send for R2P2Server<T, S>
-where T: PacketTx + PacketRx + Clone + 'static,
-S: Scheduler + Sized,
-{}
+// unsafe impl<T, S> Send for R2P2Server<T, S>
+// where T: PacketTx + PacketRx + Clone + 'static,
+// S: Scheduler + Sized,
+// {}
 
 pub struct R2P2Request {
     id: RequestId,
@@ -400,14 +395,6 @@ impl R2P2Request {
         self.msgs.push(pkt);
     }
 
-    pub fn src(&self) -> Ipv4Addr {
-        Ipv4Addr::from(self.id.src_addr())
-    }
-
-    pub fn src_port(&self) -> u16 {
-        self.id.src_port()
-    }
-
     pub fn pkts(&self) -> &Vec<CrossPacket> {
         &self.msgs
     }
@@ -437,19 +424,14 @@ impl Clone for R2P2Request {
 
 pub struct R2P2Response {
     pkts: Vec<CrossPacket>,
-    dst_addr: Ipv4Addr,
-    dst_port: u16,
     req_id: RequestId,
 }
 
 impl R2P2Response {
     #[inline]
-    pub fn new(pkts: Vec<CrossPacket>, dst: Ipv4Addr,
-               dst_port: u16, req_id: RequestId) -> R2P2Response
+    pub fn new(pkts: Vec<CrossPacket>, req_id: RequestId) -> R2P2Response
     {
         R2P2Response {
-            dst_addr: dst,
-            dst_port: dst_port,
             req_id: req_id,
             pkts: pkts,
         }

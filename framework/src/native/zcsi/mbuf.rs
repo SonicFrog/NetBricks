@@ -19,7 +19,7 @@ pub struct MBuf {
     timestamp: u64,
     userdata: u64,
     pool: u64,
-    next: *mut MBuf,
+    pub next: *mut MBuf,
     tx_offload: u64,
     priv_size: u16,
     timesync: u16,

@@ -3,64 +3,39 @@ extern crate logmap;
 use e2d2::common::EmptyMetadata;
 use e2d2::headers::*;
 use e2d2::interface::*;
-use e2d2::native::zcsi::{send_pkts, ipv4_cksum, MBuf};
+use e2d2::native::zcsi::ipv4_cksum;
 use e2d2::operators::{Batch, ReceiveBatch};
-use e2d2::queues::{new_mpsc_queue_pair, MpscProducer};
 use e2d2::scheduler::{Executable, Scheduler};
 
 use std::boxed::Box;
-use std::fmt::Display;
 use std::mem;
 use std::net::Ipv4Addr;
-use std::slice;
-use std::str::from_utf8;
 use std::result::Result;
 use std::sync::Arc;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
 
 use super::r2p2::R2P2Header;
 use self::logmap::LoanMap;
 
-pub type Socket = u64;
+pub type Socket = u16;
 
 /// A NetBricks UDP stack
-pub struct UdpStack<T>
-where
-    T: PacketRx + PacketTx + Clone + 'static,
+pub struct UdpStack
 {
-    // the last fd for the last opened socket
-    fd: AtomicU64,
     // all opened sockets are contained in this map
     sockets: LoanMap<Socket, Arc<UdpSocket>>,
-    // the PMD ports that this stack runs on
-    ports: Vec<T>,
 
-    // network packet sender
+     // ARP cache for outgoing packets
+    macs: Arc<LoanMap<Ipv4Addr, MacAddress>>,
+
+    // Sending end of the packet pipeline
     pkt_out: Sender<Packet<R2P2Header, EmptyMetadata>>,
 }
 
-unsafe impl<T> Send for UdpStack<T>
-where T: PacketRx + PacketTx + Clone + 'static {}
-
-unsafe impl<T> Sync for UdpStack<T>
-where T: PacketRx + PacketTx + Clone + 'static {}
-
-trait SocketID {
-    type Addr: PartialEq;
-    type Port: PartialEq;
-
-    fn addr(&self) -> Self::Addr;
-    fn port(&self) -> Self::Port;
-}
-
-impl<T> UdpStack<T>
-where
-    T: PacketRx + PacketTx + Clone + 'static,
-{
-    fn setup_udp_recv<S>(ports: Vec<T>, sched: &mut S) -> Arc<UdpStack<T>>
-    where S: Scheduler + Sized,
+impl UdpStack {
+    fn setup_udp_recv<T, S>(ports: Vec<T>, sched: &mut S) -> Arc<UdpStack>
+    where T: PacketRx + PacketTx + Clone + 'static,
+          S: Scheduler + Sized,
     {
         println!("Setting up UDP recv pipelines...");
 
@@ -75,21 +50,31 @@ where
 
                 ReceiveBatch::new(port.clone())
                     .parse::<MacHeader>()
+                    .metadata(box move |pkt| {
+                        pkt.get_header().src.clone()
+                    })
                     .parse::<IpHeader>()
                     .metadata(box move |pkt|{
                         // keep the source ip around for later replies
-                        pkt.get_header().src()
+                        let addr = pkt.get_header().src();
+                        let mac = pkt.read_metadata().clone();
+
+                        (addr, mac)
                     })
                     .parse::<UdpHeader>()
                     .map(box move |pkt| {
-                        let addr = Ipv4Addr::from(*pkt.read_metadata());
-                        let port = pkt.get_header().dst_port() as u64;
+                        let md = pkt.read_metadata();
+                        let mac = md.1.clone();
+                        let addr = Ipv4Addr::from(md.0);
+                        let port = pkt.get_header().dst_port();
+
+                        stack.macs.put(addr, mac);
 
                         stack.sockets.get(&port).map(|sock| {
                             let mut tmp = CrossPacket::from(pkt);
                             let len = IpHeader::size() + MacHeader::size() +
                                 UdpHeader::size();
-                            let src_port = pkt.get_header().src_port() as u16;
+                            let src_port = pkt.get_header().src_port();
 
                             tmp.remove_data_head(len);
 
@@ -112,9 +97,10 @@ where
     /// Runs a new stack on the given scheduler utilizing the given `PortQueue`s
     /// The user provides a setup function that is executed on the resulting
     /// UdpStack after creation
-    pub fn run_stack_on<F, S, V>(ports: Vec<T>,
-                                 sched: &mut S, setup: F) -> (Arc<UdpStack<T>>, V)
-    where F: (FnOnce(&Arc<UdpStack<T>>) -> V) + 'static,
+    pub fn run_stack_on<F, T, S, V>(ports: Vec<T>,
+                                 sched: &mut S, setup: F) -> (Arc<UdpStack>, V)
+    where F: (FnOnce(&Arc<UdpStack>) -> V) + 'static,
+          T: PacketRx + PacketTx + Clone + 'static,
           S: Scheduler + Sized,
           V: Sized,
     {
@@ -124,13 +110,14 @@ where
         (stack, result)
     }
 
-    pub fn socket_for(&self, sock: u64) -> Arc<UdpSocket> {
+    pub fn socket_for(&self, sock: Socket) -> Arc<UdpSocket> {
         self.sockets.get(&sock).unwrap().clone()
     }
 
     /// Creates a new UDPStack on the given scheduler using the given `PortQueue`s
-    pub fn new<S>(ports: Vec<T>, sched: &mut S) -> UdpStack<T>
-    where S: Scheduler + Sized,
+    pub fn new<T, S>(ports: Vec<T>, sched: &mut S) -> UdpStack
+    where T: PacketRx + PacketTx + Clone + 'static,
+          S: Scheduler + Sized,
     {
         if ports.len() > 1{
             println!("using more than one TX ring is currently unsupported");
@@ -139,9 +126,8 @@ where
         let (send, recv) = channel();
 
         let stack = UdpStack {
-            fd: AtomicU64::new(0),
-            ports: ports.clone(),
             sockets: LoanMap::with_capacity(65536, 1),
+            macs: Arc::new(LoanMap::with_capacity(65536, 1)),
             pkt_out: send,
         };
 
@@ -152,34 +138,34 @@ where
     }
 
     /// Binds a new socket on this UDPStack
-    pub fn bind<F>(&self, addr: Ipv4Addr, port: u16, read_cb: F) -> u64
+    pub fn bind<F>(&self, addr: Ipv4Addr, port: u16, read_cb: F) -> Socket
     where F: Fn(CrossPacket, Ipv4Addr, u16) + 'static,
     {
+        let macs = Arc::clone(&self.macs);
+
         let sock = Arc::new(UdpSocket::new(
-            self.fd.fetch_add(1, Ordering::AcqRel),
             self.pkt_out.clone(),
+            macs,
             addr,
             port,
             Box::new(read_cb),
         ));
 
-        self.sockets.put(port as u64, Arc::clone(&sock));
+        self.sockets.put(port, Arc::clone(&sock));
 
-        port as u64
-    }
-
-    /// Closes the given socket
-    pub fn close(&self, socket: u64) {
-        self.sockets.remove(socket);
+        port
     }
 }
 
+unsafe impl Send for UdpStack {}
+unsafe impl Sync for UdpStack {}
+
 pub struct UdpSocket {
-    fd: u64,
     read_cb: PacketCallback,
     pkt_out: Sender<Packet<R2P2Header, EmptyMetadata>>,
     src: Ipv4Addr,
     src_port: u16,
+    macs: Arc<LoanMap<Ipv4Addr, MacAddress>>,
 }
 
 unsafe impl Send for UdpSocket {}
@@ -188,16 +174,17 @@ unsafe impl Sync for UdpSocket {}
 pub type PacketCallback = Box<Fn(CrossPacket, Ipv4Addr, u16)>;
 
 impl UdpSocket {
-    fn new(fd: u64, producers: Sender<Packet<R2P2Header, EmptyMetadata>>,
+    fn new(producers: Sender<Packet<R2P2Header, EmptyMetadata>>,
+           macs: Arc<LoanMap<Ipv4Addr, MacAddress>>,
            src: Ipv4Addr,
            src_port: u16,
            read_cb: PacketCallback) -> UdpSocket
     {
         UdpSocket {
-            fd,
-            read_cb,
-            src,
-            src_port,
+            read_cb: read_cb,
+            src: src,
+            src_port: src_port,
+            macs: macs,
             pkt_out: producers,
         }
     }
@@ -207,24 +194,29 @@ impl UdpSocket {
     pub fn send(&self, pkt: &CrossPacket,
                 addr: &Ipv4Addr,
                 port: u16,
-                add: R2P2Header)
+                add: R2P2Header) -> Result<usize, ()>
     {
-        let len = pkt.length();
         let mut ip: IpHeader = IpHeader::new();
         let mut udp: UdpHeader = UdpHeader::new();
         let mut mac: MacHeader = MacHeader::new();
 
-        // FIXME: MACs are hardcoded for now
-        mac.dst = MacAddress::new(0xb8, 0xca, 0x3a, 0x69, 0xcc, 0x10);
-        //mac.dst = MacAddress::new(0xa0, 0x36, 0x9f, 0x27, 0x3c, 0x16);
+        if let Some(mac_dst) = self.macs.get(addr) {
+            mac.dst = mac_dst.clone();
+        } else {
+            return Err(());
+        }
+
+        // FIXME: MAC source is hardcoded for now
         mac.src = MacAddress::new(0xb8, 0xca, 0x3a, 0x69, 0xb8, 0x98);
         mac.set_etype(0x0800);
+
+        let hdr_len = UdpHeader::size() + R2P2Header::size() +
+            IpHeader::size();
 
         ip.set_ttl(64);
         ip.set_version(4);
         ip.set_ihl(5);
-        ip.set_length(pkt.length() + (UdpHeader::size() as u16) +
-                      (R2P2Header::size() as u16) + IpHeader::size() as u16);
+        ip.set_length(pkt.length() + hdr_len as u16);
         ip.set_flags(2);
         ip.set_dst(u32::from(*addr));
         ip.set_src(u32::from(self.src));
@@ -247,12 +239,13 @@ impl UdpSocket {
             .push_header(&add).unwrap();
 
         self.pkt_out.send(upkt).unwrap();
+
+        Ok(pkt.length() as usize)
     }
 
     pub fn checksum(&self, p: &IpHeader) -> u16
     {
         unsafe {
-            let ptr = p as *const IpHeader;
             let bytes = mem::transmute::<*const IpHeader, *mut u8>(p);
             ipv4_cksum(bytes) as u16
         }
@@ -260,8 +253,7 @@ impl UdpSocket {
 
     /// Delivers a set of packets to this socket, i.e. calls the read_cb
     /// registered by user
-    #[inline]
-    fn deliver(&self, mut pkt: CrossPacket,
+    fn deliver(&self, pkt: CrossPacket,
                src_addr: Ipv4Addr,
                src_port: u16)
     {
@@ -319,12 +311,7 @@ where T: PacketTx + Clone + 'static
     }
 
     fn dependencies(&mut self) -> Vec<usize> {
+        // this depends on nothing
         vec![]
-    }
-}
-
-impl Drop for UdpSocket {
-    fn drop(&mut self) {
-        println!("socket {}:{} closed", self.src, self.src_port);
     }
 }
