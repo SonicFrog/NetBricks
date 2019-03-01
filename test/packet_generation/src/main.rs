@@ -13,8 +13,8 @@ use e2d2::config::{basic_opts, read_matches};
 use e2d2::scheduler::*;
 
 use std::env;
-use std::process;
 use std::net::Ipv4Addr;
+use std::process;
 use std::sync::Arc;
 use std::sync::mpsc::{Sender, channel};
 use std::thread;
@@ -50,12 +50,14 @@ fn main() {
     match initialize_system(&configuration) {
         Ok(mut context) => {
             context.start_schedulers();
-            context.add_pipeline_to_run(Arc::new(move |p, s: &mut StandaloneScheduler| {
-                let addr = Ipv4Addr::new(10, 90, 44, 214);
-                let server = RedisServer::new(p, s, addr, 9000);
+            context.add_pipeline_to_run(
+                Arc::new(move |p, s: &mut StandaloneScheduler| {
+                    let addr = Ipv4Addr::new(10, 90, 44, 214);
+                    let server = RedisServer::new(p, s, addr, 9000);
 
-                sender.tx.send(server).unwrap();
-            }));
+                    sender.tx.send(server).unwrap();
+                }),
+            );
 
             let _server = rx.recv().unwrap();
 

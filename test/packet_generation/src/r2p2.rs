@@ -1,6 +1,14 @@
 extern crate e2d2;
 extern crate logmap;
 
+
+use super::nf::UdpStack;
+
+use e2d2::headers::{EndOffset, UdpHeader};
+use e2d2::interface::*;
+use e2d2::scheduler::Scheduler;
+
+use logmap::OptiMap;
 use std::collections::hash_map::RandomState;
 use std::convert::TryFrom;
 use std::fmt;
@@ -10,14 +18,6 @@ use std::ptr;
 use std::slice::Iter;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, AtomicPtr, Ordering};
-
-use e2d2::headers::{EndOffset, UdpHeader};
-use e2d2::interface::*;
-use e2d2::scheduler::Scheduler;
-
-use logmap::OptiMap;
-
-use super::nf::UdpStack;
 
 const FIRST_FLAG: u8 = 0x80;
 
@@ -59,7 +59,7 @@ impl EndOffset for R2P2Header {
     }
 
     #[inline]
-    fn payload_size(&self, packet_size: usize)  -> usize {
+    fn payload_size(&self, packet_size: usize) -> usize {
         packet_size - self.offset()
     }
 
@@ -173,8 +173,7 @@ impl RequestId {
     }
 }
 
-pub struct R2P2Server
-{
+pub struct R2P2Server {
     /// requests which aren't complete
     pending_reqs: OptiMap<RequestId, R2P2Request, RandomState>,
     /// responses which haven't been ack'ed yet
@@ -188,22 +187,17 @@ pub struct R2P2Server
     request_cb: RequestCB,
 }
 
-impl R2P2Server
-{
-    #[inline]
-    fn handle_udp(s: &Arc<R2P2Server>,  pkt: CrossPacket,
-                  addr: Ipv4Addr, port: u16)
-    {
-        s.udp_in(pkt, addr, port);
-    }
-
-    pub fn new<T, S>(ports: Vec<T>,
-                  sched: &mut S,
-                  request_cb: RequestCB,
-                  addr: Ipv4Addr,
-                     port: u16) -> Arc<R2P2Server>
-    where T: PacketTx + PacketRx + Clone + 'static,
-          S: Scheduler + Sized + 'static,
+impl R2P2Server {
+    pub fn new<T, S>(
+        ports: Vec<T>,
+        sched: &mut S,
+        request_cb: RequestCB,
+        addr: Ipv4Addr,
+        port: u16,
+    ) -> Arc<R2P2Server>
+    where
+        T: PacketTx + PacketRx + Clone + 'static,
+        S: Scheduler + Sized + 'static,
     {
         let srv = Arc::new(R2P2Server {
             pending_reqs: OptiMap::new(),
@@ -216,15 +210,18 @@ impl R2P2Server
         let clone2 = Arc::clone(&srv);
 
         let packet_cb = move |pkt: CrossPacket, addr, port| {
-            R2P2Server::handle_udp(&clone, pkt, addr, port);
+            clone.udp_in(pkt, addr, port)
         };
 
+        // TODO: rewrite init logic (will probably need NetBricks edits)
         let stack_setup = move |stack: &Arc<UdpStack>| {
             let socket = stack.bind(addr, port, packet_cb);
 
             clone2.socket.store(socket, Ordering::Relaxed);
-            clone2.stack.store(Arc::into_raw(Arc::clone(stack)) as *mut _,
-                               Ordering::Relaxed);
+            clone2.stack.store(
+                Arc::into_raw(Arc::clone(stack)) as *mut _,
+                Ordering::Relaxed,
+            );
 
             0
         };
@@ -234,9 +231,8 @@ impl R2P2Server
         srv
     }
 
-    fn udp_in(&self, mut pkt: CrossPacket, src: Ipv4Addr, src_port: u16)
-    {
-
+    #[inline]
+    fn udp_in(&self, mut pkt: CrossPacket, src: Ipv4Addr, src_port: u16) {
         let header = pkt.get_header::<R2P2Header>().clone();
 
         pkt.remove_data_head(R2P2Header::size());
@@ -250,7 +246,7 @@ impl R2P2Server
             Err(num) => {
                 println!("unknown message type {}", num);
                 return;
-            },
+            }
             Ok(tpe) => tpe,
         };
 
@@ -258,8 +254,8 @@ impl R2P2Server
             MessageType::Ack => self.acked(req_id),
 
             MessageType::Request => {
-                if let Some(request) = self.pending_reqs.get(&req_id)
-                {
+                // TODO: better request processing
+                if let Some(request) = self.pending_reqs.get(&req_id) {
                     let mut new_req = request.clone();
                     // we have already received some packets for this request
                     new_req.insert(pkt, header);
@@ -284,7 +280,7 @@ impl R2P2Server
                         self.pending_reqs.put(req_id, req);
                     }
                 }
-            },
+            }
             MessageType::Response => {
                 println!("client sent a response message");
                 return;
@@ -300,11 +296,16 @@ impl R2P2Server
     }
 
     #[inline]
-    fn udp_out(&self, resp: R2P2Response, addr: Ipv4Addr, port: u16) -> Result<(), ()> {
+    fn udp_out(
+        &self,
+        resp: R2P2Response,
+        addr: Ipv4Addr,
+        port: u16,
+    ) -> Result<(), ()> {
+        // TODO: rewrite init logic to avoid atomics here
         let socket = self.socket.load(Ordering::Relaxed);
-        let stack = unsafe { Arc::from_raw(
-            self.stack.load(Ordering::Relaxed)
-        )};
+        let stack =
+            unsafe { Arc::from_raw(self.stack.load(Ordering::Relaxed)) };
         let socket = stack.socket_for(socket);
         let mut i = 0;
 
@@ -321,8 +322,9 @@ impl R2P2Server
 
             i += 1;
 
-            socket.send(p, &addr, port, header)
-                .expect("failed to send packets");
+            socket.send(p, &addr, port, header).expect(
+                "failed to send packets",
+            );
         });
 
         forget(stack);
@@ -335,30 +337,20 @@ impl R2P2Server
     }
 }
 
-// unsafe impl<T, S> Sync for R2P2Server<T, S>
-// where T: PacketTx + PacketRx + Clone + 'static,
-// S: Scheduler + Sized,
-// {}
-
-
-// unsafe impl<T, S> Send for R2P2Server<T, S>
-// where T: PacketTx + PacketRx + Clone + 'static,
-// S: Scheduler + Sized,
-// {}
-
 pub struct R2P2Request {
     id: RequestId,
     msgs: Vec<CrossPacket>,
 }
 
 impl R2P2Request {
-    fn new(first: CrossPacket,
-           header: R2P2Header,
-           src_addr: Ipv4Addr,
-           src_port: u16) -> R2P2Request
-    {
-        assert!(R2P2Request::is_first(&header));
-        assert!(header.pkt_id() >= 1);
+    fn new(
+        first: CrossPacket,
+        header: R2P2Header,
+        src_addr: Ipv4Addr,
+        src_port: u16,
+    ) -> R2P2Request {
+        debug_assert!(R2P2Request::is_first(&header));
+        debug_assert!(header.pkt_id() >= 1);
 
         // avoid resizing by allocating all we need right now
         let mut msgs = Vec::with_capacity(header.pkt_id() as usize);
@@ -370,10 +362,7 @@ impl R2P2Request {
 
         msgs.push(first);
 
-        R2P2Request {
-            id: id,
-            msgs: msgs,
-        }
+        R2P2Request { id: id, msgs: msgs }
     }
 
     #[inline]
@@ -429,8 +418,7 @@ pub struct R2P2Response {
 
 impl R2P2Response {
     #[inline]
-    pub fn new(pkts: Vec<CrossPacket>, req_id: RequestId) -> R2P2Response
-    {
+    pub fn new(pkts: Vec<CrossPacket>, req_id: RequestId) -> R2P2Response {
         R2P2Response {
             req_id: req_id,
             pkts: pkts,
